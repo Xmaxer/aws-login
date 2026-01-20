@@ -43,9 +43,11 @@ aws-login() {
       aws sso list-account-roles --access-token "$(aws-access-token)" --account-id "$1" --output json
   }
   aws-list-sessions() {
+      [ -f ~/.aws/config ] || return 0
       grep -o '\[sso-session [^]]*\]' ~/.aws/config | sed 's/\[sso-session \(.*\)\]/\1/'
   }
   aws-delete-profile() {
+      [ -f ~/.aws/config ] || return 0
       awk -v profile="$1" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} !s' ~/.aws/config >~/.aws/config.tmp && mv ~/.aws/config.tmp ~/.aws/config
   }
   aws-save-profile() {
@@ -104,10 +106,11 @@ aws-login() {
       fi
   }
   aws-list-profiles-for-session() {
-      awk -v session="$1" '$0 ~ "^\\[profile " {p=$0; gsub("^\\[profile |\\]$","",p)} $0 ~ "^sso_session = " && $3==session && p !~ "^login" {print p}' ~/.aws/config
+      [ -f ~/.aws/config ] && awk -v session="$1" '$0 ~ "^\\[profile " {p=$0; gsub("^\\[profile |\\]$","",p)} $0 ~ "^sso_session = " && $3==session && p !~ "^login" {print p}' ~/.aws/config
       echo "Create new profile"
   }
   aws-get-session-region() {
+      [ -f ~/.aws/config ] || return 0
       awk -v session="$1" '$0 ~ "^\\[sso-session " {s=$0; gsub("^\\[sso-session |\\]$","",s)} s==session && $0 ~ "^sso_region = " {print $3}' ~/.aws/config
   }
 
@@ -204,13 +207,33 @@ aws-login() {
         sessions=$(aws-list-sessions)
 
         if [ -z "${sessions}" ]; then
-            print_warning "No sessions found. You need to run 'aws sso configure' to create one."
+            print_warning "No sessions found. You need to run 'aws configure sso' to create one."
             echo "Do you want to run it now? [y/n]"
 
             read -r choice
             if [[ "$choice" =~ ^[Yy]$ ]]; then
-                print_status "Running aws sso configure..."
-                aws sso configure
+                print_status "Running aws configure sso..."
+
+                # Ensure .aws directory exists
+                mkdir -p ~/.aws
+
+                # Run the interactive SSO configuration
+                aws configure sso
+
+                # Check if configuration was successful
+                if [ $? -ne 0 ]; then
+                    print_error "SSO configuration failed. Exiting."
+                    return 1
+                fi
+
+                # Re-fetch sessions after configuration
+                print_status "Re-fetching available SSO sessions..."
+                sessions=$(aws-list-sessions)
+
+                if [ -z "${sessions}" ]; then
+                    print_error "No sessions found after configuration. Please check your AWS SSO setup."
+                    return 1
+                fi
             else
                 print_error "Cannot proceed without an SSO session. Exiting."
                 return 1
@@ -244,7 +267,9 @@ aws-login() {
 
     beginProfileCreation() {
         print_status "Creating new AWS profile..."
-        selectedSession=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print $3; exit}' ~/.aws/config)
+        if [ -f ~/.aws/config ]; then
+            selectedSession=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print $3; exit}' ~/.aws/config)
+        fi
         if [ -z "${selectedSession}" ]; then
             print_error "No session associated to profile was found"
             return 1
@@ -306,7 +331,9 @@ aws-login() {
 
     if [[ "$isAuthenticated" == 0 ]]; then
         print_success "Already authenticated with AWS"
-        selectedSession=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print $3; exit}' ~/.aws/config)
+        if [ -f ~/.aws/config ]; then
+            selectedSession=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print $3; exit}' ~/.aws/config)
+        fi
 
         if [ -z "${selectedSession}" ]; then
             print_error "$selectedSession is not a valid session"
