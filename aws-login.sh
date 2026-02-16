@@ -34,7 +34,12 @@ aws-login() {
   }
 
   aws-access-token() {
-      cat $(ls -1d ~/.aws/sso/cache/* | grep -v botocore) | jq -r "{accessToken} | to_entries | select(.[].value != null)[0].value"
+      # Get the most recently modified cache file (excluding botocore files)
+      local latest_cache=$(ls -1t ~/.aws/sso/cache/* 2>/dev/null | grep -v botocore | head -n 1)
+      if [ -z "$latest_cache" ]; then
+          return 1
+      fi
+      cat "$latest_cache" | jq -r "{accessToken} | to_entries | select(.[].value != null)[0].value"
   }
   aws-list-accounts() {
       aws sso list-accounts --access-token "$(aws-access-token)" --output json
@@ -43,8 +48,8 @@ aws-login() {
       aws sso list-account-roles --access-token "$(aws-access-token)" --account-id "$1" --output json
   }
   aws-list-sessions() {
-      [ -f ~/.aws/config ] || return 0
-      grep -o '\[sso-session [^]]*\]' ~/.aws/config | sed 's/\[sso-session \(.*\)\]/\1/'
+      [ -f ~/.aws/config ] && grep -o '\[sso-session [^]]*\]' ~/.aws/config | sed 's/\[sso-session \(.*\)\]/\1/'
+      echo "Create new session"
   }
   aws-delete-profile() {
       [ -f ~/.aws/config ] || return 0
@@ -57,8 +62,13 @@ aws-login() {
       print_success "Profile saved and exported: $1"
   }
   aws-login-profile() {
-      aws sso login --profile "$1"
-      aws-save-profile "$1"
+      if aws sso login --profile "$1"; then
+          aws-save-profile "$1"
+          return 0
+      else
+          print_error "SSO login failed"
+          return 1
+      fi
   }
   aws-list-regions() {
       print_debug "Attempting to fetch regions dynamically from AWS..." >&2
@@ -111,7 +121,19 @@ aws-login() {
   }
   aws-get-session-region() {
       [ -f ~/.aws/config ] || return 0
-      awk -v session="$1" '$0 ~ "^\\[sso-session " {s=$0; gsub("^\\[sso-session |\\]$","",s)} s==session && $0 ~ "^sso_region = " {print $3}' ~/.aws/config
+      awk -v session="$1" '
+          $0 ~ "^\\[sso-session " {
+              s=$0
+              gsub("^\\[sso-session |\\]$","",s)
+          }
+          $0 ~ "^\\[" && $0 !~ "^\\[sso-session " {
+              s=""
+          }
+          s==session && $0 ~ "^sso_region = " {
+              print $3
+              exit
+          }
+      ' ~/.aws/config
   }
 
   aws-config-add-to-section() {
@@ -194,72 +216,98 @@ aws-login() {
     profileName="login-$sessionName"
     authRegion="eu-west-1"
 
-    aws sts get-caller-identity >/dev/null 2>&1
-    isAuthenticated=$?
+    # Check if authenticated by verifying both STS access and valid SSO token
+    isAuthenticated=1
+    if aws sts get-caller-identity >/dev/null 2>&1; then
+        # Also verify we have a valid SSO token if using SSO
+        if [ -n "$AWS_PROFILE" ] && [ -f ~/.aws/config ]; then
+            # Check if current profile uses SSO
+            uses_sso=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print "yes"; exit}' ~/.aws/config)
+            if [ "$uses_sso" = "yes" ]; then
+                # Verify SSO token exists and is valid
+                if aws-access-token >/dev/null 2>&1; then
+                    isAuthenticated=0
+                fi
+            else
+                # Non-SSO profile, STS check is sufficient
+                isAuthenticated=0
+            fi
+        else
+            isAuthenticated=0
+        fi
+    fi
 
     SELECTED_SESSION=""
+
+    beginSessionCreation() {
+        print_status "Creating new SSO session..."
+        print_status "This will configure only the SSO session (no account/role selection yet)."
+
+        # Ensure .aws directory exists
+        mkdir -p ~/.aws
+
+        # Run the interactive SSO session configuration (no account/role selection)
+        aws configure sso-session
+
+        # Check if configuration was successful
+        if [ $? -ne 0 ]; then
+            print_error "SSO session configuration failed."
+            return 1
+        fi
+
+        print_success "SSO session created successfully"
+        return 0
+    }
 
     beginSessionSelection() {
         print_status "Logging out and clearing SSO cache..."
         aws sso logout && rm -rf ~/.aws/sso/cache
 
-        print_status "Fetching available SSO sessions..."
-        sessions=$(aws-list-sessions)
+        while true; do
+            print_status "Fetching available SSO sessions..."
+            sessions=$(aws-list-sessions)
 
-        if [ -z "${sessions}" ]; then
-            print_warning "No sessions found. You need to run 'aws configure sso' to create one."
-            echo "Do you want to run it now? [y/n]"
+            session=$(echo "$sessions" | fzf -0 --border=top --border-label="Pick a session to use, or create a new one")
 
-            read -r choice
-            if [[ "$choice" =~ ^[Yy]$ ]]; then
-                print_status "Running aws configure sso..."
-
-                # Ensure .aws directory exists
-                mkdir -p ~/.aws
-
-                # Run the interactive SSO configuration
-                aws configure sso
-
-                # Check if configuration was successful
-                if [ $? -ne 0 ]; then
-                    print_error "SSO configuration failed. Exiting."
-                    return 1
-                fi
-
-                # Re-fetch sessions after configuration
-                print_status "Re-fetching available SSO sessions..."
-                sessions=$(aws-list-sessions)
-
-                if [ -z "${sessions}" ]; then
-                    print_error "No sessions found after configuration. Please check your AWS SSO setup."
-                    return 1
-                fi
-            else
-                print_error "Cannot proceed without an SSO session. Exiting."
+            if [ -z "${session}" ]; then
+                print_error "No session selected"
                 return 1
             fi
-        fi
 
-        session=$(echo "$sessions" | fzf -0 --border=top --border-label="Pick a session to use")
+            if [[ "$session" == "Create new session" ]]; then
+                if ! beginSessionCreation; then
+                    print_warning "Returning to session selection..."
+                    continue
+                fi
+                # Loop back to session selection to pick the newly created session
+                continue
+            fi
 
-        if [ -z "${session}" ]; then
-            print_error "$session is not a valid session"
-            return 1
-        fi
+            # Valid session selected, break out of loop
+            break
+        done
 
         print_success "Selected session: $session"
         profileName="login-$session"
         sessionRegion=$(aws-get-session-region "$session")
 
+        print_debug "Session region retrieved: '$sessionRegion'"
+        print_debug "Session region line count: $(echo "$sessionRegion" | wc -l)"
+
         print_status "Creating temporary login profile..."
         aws-delete-profile "$profileName" && {
-            echo "[profile $profileName]" >> ~/.aws/config
-            echo "sso_session = $session" >> ~/.aws/config
-            echo "region = $sessionRegion" >> ~/.aws/config
+            cat >> ~/.aws/config <<EOF
+[profile $profileName]
+sso_session = $session
+region = $sessionRegion
+EOF
         }
 
         print_status "Initiating SSO login..."
-        aws-login-profile "$profileName"
+        if ! aws-login-profile "$profileName"; then
+            print_error "Failed to authenticate with session: $session"
+            return 1
+        fi
 
         SELECTED_SESSION="$session"
         return 0
@@ -313,7 +361,14 @@ aws-login() {
         profileName="${profileName//[^a-zA-Z0-9\/]/-}"
 
         print_status "Creating profile: $profileName"
-        aws-delete-profile "$profileName" && echo "[profile $profileName]\nsso_session = $selectedSession\nsso_account_id = $accountId\nsso_role_name = $role\nregion = $region\noutput = json" >>~/.aws/config
+        aws-delete-profile "$profileName" && cat >> ~/.aws/config <<EOF
+[profile $profileName]
+sso_session = $selectedSession
+sso_account_id = $accountId
+sso_role_name = $role
+region = $region
+output = json
+EOF
 
         aws-save-profile "$profileName"
     }
@@ -343,14 +398,20 @@ aws-login() {
         print_status "Currently authenticated with session: $selectedSession"
         read "switchAccounts?Would you like to switch AWS sessions? [y/N]: "
         if [[ "$switchAccounts" =~ ^[Yy]$ ]]; then
-            beginSessionSelection
+            if ! beginSessionSelection; then
+                print_error "Session selection failed"
+                return 1
+            fi
             selectedSession="$SELECTED_SESSION"
         fi
 
         beginProfileSelection "$selectedSession"
     else
         print_warning "Not currently authenticated with AWS"
-        beginSessionSelection
+        if ! beginSessionSelection; then
+            print_error "Session selection and authentication failed"
+            return 1
+        fi
         selectedSession="$SELECTED_SESSION"
         beginProfileSelection "$selectedSession"
     fi
