@@ -51,6 +51,32 @@ aws-login() {
       [ -f ~/.aws/config ] && grep -o '\[sso-session [^]]*\]' ~/.aws/config | sed 's/\[sso-session \(.*\)\]/\1/'
       echo "Create new session"
   }
+  aws-list-all-profiles() {
+      [ -f ~/.aws/config ] || { print_warning "No ~/.aws/config found."; return 1; }
+
+      local sessions
+      sessions=$(grep -o '\[sso-session [^]]*\]' ~/.aws/config | sed 's/\[sso-session \(.*\)\]/\1/')
+
+      if [ -z "$sessions" ]; then
+          print_warning "No SSO sessions found in ~/.aws/config."
+          return 0
+      fi
+
+      while IFS= read -r session; do
+          echo -e "${PURPLE}$session${NC}"
+          awk -v session="$session" '
+              /^\[profile / {
+                  p=$0
+                  gsub(/^\[profile |\]$/, "", p)
+              }
+              /^\[/ && !/^\[profile / { p="" }
+              /^sso_session = / && $3==session && p!="" {
+                  print "  " p
+              }
+          ' ~/.aws/config
+          echo ""
+      done <<< "$sessions"
+  }
   aws-delete-profile() {
       [ -f ~/.aws/config ] || return 0
       awk -v profile="$1" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} !s' ~/.aws/config >~/.aws/config.tmp && mv ~/.aws/config.tmp ~/.aws/config
@@ -177,6 +203,11 @@ aws-login() {
           print_warning "$PROPERTY_NAME already exists in profile '$AWS_PROFILE', skipping"
       fi
   }
+
+    if [[ "$1" == "--list-profiles" ]]; then
+        aws-list-all-profiles
+        return $?
+    fi
 
     if ! command -v fzf &>/dev/null; then
         print_warning "fzf is required to run this script. Do you want to install it now? [y/n]"
