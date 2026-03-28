@@ -204,8 +204,58 @@ aws-login() {
       fi
   }
 
+  aws-manage-profiles() {
+      [ -f ~/.aws/config ] || { print_warning "No ~/.aws/config found."; return 0; }
+
+      local last_status=""
+      while true; do
+          local profiles
+          profiles=$(awk '/^\[profile / {
+              p=$0
+              gsub(/^\[profile |\]$/, "", p)
+              if (p !~ /^login-/) print p
+          }' ~/.aws/config 2>/dev/null)
+
+          if [ -z "$profiles" ]; then
+              print_warning "No profiles to manage."
+              return 0
+          fi
+
+          local header="[Enter] delete  [Esc] quit"
+          [ -n "$last_status" ] && header="${last_status} | ${header}"
+
+          local selected
+          selected=$(echo "$profiles" | fzf \
+              --border=top \
+              --border-label="Manage AWS Profiles" \
+              --header="$header" \
+              --prompt="Select profile to delete > " \
+              -0)
+
+          [ -z "$selected" ] && break
+
+          read "confirm?Are you sure you want to delete profile '$selected'? [y/N]: "
+          if [[ "$confirm" =~ ^[Yy]$ ]]; then
+              aws-delete-profile "$selected"
+              last_status="Deleted: $selected"
+              print_success "Profile '$selected' deleted."
+          else
+              last_status="Cancelled: $selected"
+          fi
+      done
+  }
+
     if [[ "$1" == "--list-profiles" ]]; then
         aws-list-all-profiles
+        return $?
+    fi
+
+    if [[ "$1" == "--manage-profiles" ]]; then
+        if ! command -v fzf &>/dev/null; then
+            print_error "fzf is required for --manage-profiles"
+            return 1
+        fi
+        aws-manage-profiles
         return $?
     fi
 
@@ -346,7 +396,11 @@ EOF
 
     beginProfileCreation() {
         print_status "Creating new AWS profile..."
-        if [ -f ~/.aws/config ]; then
+
+        # Prefer session passed as argument; fall back to deriving from $AWS_PROFILE
+        if [ -n "$1" ]; then
+            selectedSession="$1"
+        elif [ -f ~/.aws/config ]; then
             selectedSession=$(awk -v profile="$AWS_PROFILE" '$0 ~ "^\\[profile " {s=($0=="[profile " profile "]")} $0 ~ "^\\[" && $0 !~ "^\\[profile " {s=0} s && $0 ~ "^sso_session = " {print $3; exit}' ~/.aws/config)
         fi
         if [ -z "${selectedSession}" ]; then
@@ -355,14 +409,25 @@ EOF
         fi
 
         print_status "Fetching available AWS accounts..."
-        accountName=$(aws-list-accounts | jq -r ".accountList[].accountName" | fzf -0 --border=top --border-label="Choose the AWS account to use")
+        accounts_json=$(aws-list-accounts 2>/dev/null)
+
+        if [ -z "$accounts_json" ] || ! echo "$accounts_json" | jq -e '.accountList' >/dev/null 2>&1; then
+            print_warning "SSO access token is invalid or expired. Re-authenticating with session: $selectedSession..."
+            if ! aws sso login --sso-session "$selectedSession"; then
+                print_error "Re-authentication failed"
+                return 1
+            fi
+            accounts_json=$(aws-list-accounts)
+        fi
+
+        accountName=$(echo "$accounts_json" | jq -r ".accountList[].accountName" | fzf -0 --border=top --border-label="Choose the AWS account to use")
 
         if [ -z "${accountName}" ]; then
             print_error "No account selected, quitting"
             return 1
         fi
 
-        accountId=$(aws-list-accounts | jq -r --arg accountName $accountName '.accountList[] | select(.accountName==$accountName).accountId')
+        accountId=$(echo "$accounts_json" | jq -r --arg accountName "$accountName" '.accountList[] | select(.accountName==$accountName).accountId')
 
         print_success "Selected account: $accountName ($accountId)"
 
@@ -408,7 +473,7 @@ EOF
         print_status "Loading profiles for session: $1"
         selectedProfile=$(aws-list-profiles-for-session "$1" | fzf -0 --border=top --border-label="(Session: $1) Choose an existing profile, or create a new one")
         if [[ "$selectedProfile" == "Create new profile" ]]; then
-            beginProfileCreation
+            beginProfileCreation "$1"
         else
             print_success "Selected existing profile: $selectedProfile"
             aws-save-profile "$selectedProfile"
