@@ -84,7 +84,7 @@ aws-login() {
   aws-save-profile() {
       print_highlight "Saving profile: $1"
       export AWS_PROFILE="$1"
-      awk -v profile="$AWS_PROFILE" '{gsub(/export AWS_PROFILE=.*/, "export AWS_PROFILE=" profile)} 1' ~/.zsh_env >~/.zsh_env.tmp && mv ~/.zsh_env.tmp ~/.zsh_env
+      awk -v profile="$AWS_PROFILE" '{gsub(/export AWS_PROFILE=.*/, "export AWS_PROFILE=" profile)} 1' ~/.zshenv >~/.zshenv.tmp && mv ~/.zshenv.tmp ~/.zshenv
       print_success "Profile saved and exported: $1"
   }
   aws-login-profile() {
@@ -291,8 +291,8 @@ aws-login() {
         return 1
     fi
 
-    [ -f ~/.zsh_env ] || touch ~/.zsh_env
-    grep -q "export AWS_PROFILE=" ~/.zsh_env || echo "export AWS_PROFILE=" >>~/.zsh_env
+    [ -f ~/.zshenv ] || touch ~/.zshenv
+    grep -q "export AWS_PROFILE=" ~/.zshenv || echo "export AWS_PROFILE=" >>~/.zshenv
 
     profileName="login-$sessionName"
     authRegion="eu-west-1"
@@ -514,7 +514,7 @@ EOF
 
     print_success "AWS login process completed successfully!"
     print_status "Current AWS profile: $AWS_PROFILE"
-    source ~/.zsh_env
+    source ~/.zshenv
 }
 
-[ ! -f ~/.zsh_env ] || source ~/.zsh_env
+[ ! -f ~/.zshenv ] || source ~/.zshenv

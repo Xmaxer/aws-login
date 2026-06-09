@@ -98,7 +98,7 @@ Special characters are replaced with hyphens for compatibility.
 
 ## Environment Variables
 
-The script manages the `AWS_PROFILE` environment variable and saves it to `~/.zsh_env` for persistence across sessions.
+The script manages the `AWS_PROFILE` environment variable and saves it to `~/.zshenv` for persistence across sessions.
 
 ## Dependencies
 
@@ -156,7 +156,7 @@ To remove the script:
 
 3. Remove environment file (optional):
    ```bash
-   rm -f ~/.zsh_env
+   rm -f ~/.zshenv
    ```
 
 ## Contributing
